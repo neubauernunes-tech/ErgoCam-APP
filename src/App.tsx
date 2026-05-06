@@ -25,8 +25,7 @@ import {
   Timer,
   Trophy,
   Zap,
-  RefreshCw,
-  FileText
+  RefreshCw
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -39,13 +38,59 @@ import {
   AreaChart,
   Area
 } from 'recharts';
-import { jsPDF } from 'jspdf';
-import 'jspdf-autotable';
 import * as tf from '@tensorflow/tfjs-core';
 import * as poseDetection from '@tensorflow-models/pose-detection';
 import '@tensorflow/tfjs-backend-webgl';
+import { auth, db } from './lib/firebase';
+import { 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  onAuthStateChanged, 
+  signOut,
+  User as FirebaseUser 
+} from 'firebase/auth';
+import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 
 // --- Types ---
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+  }
+}
+
+const handleFirestoreError = (error: unknown, operationType: OperationType, path: string | null) => {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  if (errInfo.error.includes('permissions')) {
+    // Silently log or show a hint, but don't spam alerts unless critical
+    console.warn("Permission denied. Ensure database rules are deployed and user is authenticated.");
+  }
+  throw new Error(JSON.stringify(errInfo));
+};
+
 type AppState = 'splash' | 'dashboard' | 'wellness' | 'analytics' | 'settings' | 'pricing';
 type Language = 'pt' | 'en' | 'es';
 type PostureStatus = 'good' | 'bad';
@@ -160,7 +205,7 @@ const translations = {
       },
       enterprise: {
         name: "Enterprise",
-        price: "R$ 49,90",
+        price: "R$ 39,90",
         period: "/mês",
         features: ["Tudo do Pro", "Analytics de Equipe", "Suporte Prioritário", "Gestão de Licenças"]
       },
@@ -205,6 +250,11 @@ const translations = {
       stats: "STATS",
       pricing: "PLANOS",
       config: "AJUSTES"
+    },
+    login: {
+      button: "Entrar com Google",
+      privacy: "Sua privacidade é processada localmente.\nSeus dados de visão nunca saem do dispositivo.",
+      subtitle: "Intelligent Posture Monitor"
     }
   },
   en: {
@@ -292,13 +342,13 @@ const translations = {
       },
       pro: {
         name: "Pro",
-        price: "$4.99",
+        price: "R$ 19,90",
         period: "/mo",
         features: ["Advanced AI", "System Notifications", "Full History", "Pomodoro Mode", "No ads"]
       },
       enterprise: {
         name: "Enterprise",
-        price: "$12.99",
+        price: "R$ 39,90",
         period: "/mo",
         features: ["Everything in Pro", "Team Analytics", "Priority Support", "License Management"]
       },
@@ -343,6 +393,11 @@ const translations = {
       stats: "STATS",
       pricing: "PRICING",
       config: "SETTINGS"
+    },
+    login: {
+      button: "Sign in with Google",
+      privacy: "Your privacy is processed locally.\nYour vision data never leaves the device.",
+      subtitle: "Intelligent Posture Monitor"
     }
   },
   es: {
@@ -424,19 +479,19 @@ const translations = {
       description: "Invierte en tu salud y productividad con funciones avanzadas.",
       free: {
         name: "Gratis",
-        price: "0€",
+        price: "R$ 0",
         period: "/mes",
         features: ["Monitoreo básico", "Historial limitado (5)", "Alertas visuales"]
       },
       pro: {
         name: "Pro",
-        price: "4,99€",
+        price: "R$ 19,90",
         period: "/mes",
         features: ["IA Avanzada", "Notificaciones del Sistema", "Historial Completo", "Modo Enfoque", "Sin anuncios"]
       },
       enterprise: {
         name: "Enterprise",
-        price: "12,99€",
+        price: "R$ 39,90",
         period: "/mes",
         features: ["Todo en Pro", "Analítica de Equipo", "Soporte Prioritario", "Gestión de Licencias"]
       },
@@ -481,11 +536,60 @@ const translations = {
       stats: "STATS",
       pricing: "PLANES",
       config: "AJUSTES"
+    },
+    login: {
+      button: "Entrar con Google",
+      privacy: "Su privacidad se procesa localmente.\nSus datos de visión nunca salen del dispositivo.",
+      subtitle: "Intelligent Posture Monitor"
     }
   }
 };
 
 // --- Components ---
+
+const LoginScreen = ({ onLogin, language }: { onLogin: () => void, language: Language }) => {
+  const t = translations[language].login;
+  return (
+    <div className="min-h-screen bg-black flex items-center justify-center p-6 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-from)_0%,_transparent_70%)] from-cyan-950/20">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.9 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="max-w-md w-full bg-white/5 border border-white/10 p-10 rounded-[40px] backdrop-blur-3xl text-center shadow-2xl relative overflow-hidden"
+      >
+        <div className="absolute -top-24 -right-24 w-48 h-48 bg-cyan-accent/10 rounded-full blur-3xl"></div>
+        <div className="absolute -bottom-24 -left-24 w-48 h-48 bg-purple-500/10 rounded-full blur-3xl"></div>
+
+        <div className="mb-8 flex justify-center relative">
+          <motion.div 
+            animate={{ rotate: 360 }}
+            transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
+            className="absolute inset-0 border-2 border-dashed border-cyan-accent/20 rounded-full scale-150"
+          ></motion.div>
+          <div className="w-24 h-24 bg-cyan-accent rounded-3xl flex items-center justify-center shadow-[0_0_50px_rgba(0,216,255,0.4)] relative z-10">
+            <User size={48} className="text-black" />
+          </div>
+        </div>
+        
+        <h1 className="text-5xl font-black text-white uppercase tracking-tighter mb-2 italic">ERGO</h1>
+        <p className="text-cyan-accent text-[10px] font-black tracking-[0.4em] uppercase mb-12">{t.subtitle}</p>
+        
+        <button 
+          onClick={onLogin}
+          className="group w-full bg-white text-black font-black py-6 rounded-2xl flex items-center justify-center gap-4 hover:bg-cyan-accent transition-all uppercase tracking-widest text-sm shadow-xl"
+        >
+          <img src="https://www.google.com/favicon.ico" alt="Google" className="w-6 h-6" />
+          {t.button}
+        </button>
+        
+        <div className="mt-12 p-4 bg-white/5 rounded-2xl border border-white/5">
+          <p className="text-[10px] text-white/40 uppercase font-black tracking-widest leading-relaxed">
+            {t.privacy}
+          </p>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
 
 const SplashScreen = ({ onStart, language, onSetLanguage }: { onStart: () => void, language: Language, onSetLanguage: (l: Language) => void }) => {
   const t = translations[language].splash;
@@ -860,8 +964,22 @@ const AnalyticsView = ({ language, history, streak }: { language: Language, hist
 
 const PricingView = ({ language, currentPlan, onSelectPlan }: { language: Language, currentPlan: UserPlan, onSelectPlan: (plan: UserPlan) => void }) => {
   const t = translations[language].pricing;
-  
-  const plans: { id: UserPlan, data: any, icon: React.ReactNode, color: string }[] = [
+
+  const handleCheckout = (planId: UserPlan) => {
+    if (planId === 'free' || planId === currentPlan) {
+      onSelectPlan(planId);
+      return;
+    }
+
+    // Direct Mercado Pago Links
+    if (planId === 'pro') {
+      window.location.href = 'https://mpago.la/2Bv2WrG'; // R$ 19,90
+    } else if (planId === 'enterprise') {
+      window.location.href = 'https://mpago.la/1S72L2y'; // R$ 39,90
+    }
+  };
+
+  const plansList: { id: UserPlan, data: any, icon: React.ReactNode, color: string }[] = [
     { id: 'free', data: t.free, icon: <Heart size={32} />, color: 'text-white/40' },
     { id: 'pro', data: t.pro, icon: <Zap size={32} />, color: 'text-cyan-accent' },
     { id: 'enterprise', data: t.enterprise, icon: <Trophy size={32} />, color: 'text-yellow-400' }
@@ -881,7 +999,7 @@ const PricingView = ({ language, currentPlan, onSelectPlan }: { language: Langua
       </header>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-        {plans.map((plan) => (
+        {plansList.map((plan) => (
           <motion.div 
             key={plan.id}
             whileHover={{ y: -10 }}
@@ -911,9 +1029,9 @@ const PricingView = ({ language, currentPlan, onSelectPlan }: { language: Langua
             </ul>
             
             <button 
-              onClick={() => onSelectPlan(plan.id)}
+              onClick={() => handleCheckout(plan.id)}
               disabled={currentPlan === plan.id}
-              className={`w-full py-5 rounded-2xl font-black uppercase tracking-widest transition-all ${currentPlan === plan.id ? 'bg-white/10 text-white/40 cursor-default' : 'bg-white text-black hover:bg-cyan-accent'}`}
+              className={`w-full py-5 rounded-2xl font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${currentPlan === plan.id ? 'bg-white/10 text-white/40 cursor-default' : 'bg-white text-black hover:bg-cyan-accent active:scale-95'}`}
             >
               {currentPlan === plan.id ? t.current : t.cta}
             </button>
@@ -935,17 +1053,13 @@ const SettingsView = ({
   onCalibrate,
   currentPlan,
   onUpgrade,
-  profiles,
-  activeProfileId,
-  onSwitchProfile,
-  onCreateProfile,
-  onDeleteProfile,
   isCalibrating,
   isSelectingROI,
   onToggleROISelection,
-  onDownloadReport,
   useML,
-  onToggleML
+  onToggleML,
+  user,
+  onLogout
 }: { 
   language: Language, 
   sensitivity: number, 
@@ -958,19 +1072,14 @@ const SettingsView = ({
   isCalibrating: boolean,
   currentPlan: UserPlan,
   onUpgrade: () => void,
-  profiles: UserProfile[],
-  activeProfileId: string,
-  onSwitchProfile: (id: string) => void,
-  onCreateProfile: (name: string) => void,
-  onDeleteProfile: (id: string) => void,
   isSelectingROI: boolean,
   onToggleROISelection: () => void,
-  onDownloadReport: () => void,
   useML: boolean,
-  onToggleML: () => void
+  onToggleML: () => void,
+  user: any,
+  onLogout: () => void
 }) => {
   const t = translations[language].settings;
-  const [newProfileName, setNewProfileName] = useState('');
 
   return (
     <motion.div 
@@ -985,64 +1094,6 @@ const SettingsView = ({
       </header>
 
       <div className="space-y-8">
-        {/* Profiles Management */}
-        <div className="bg-white/5 border border-white/10 rounded-3xl p-8">
-          <div className="flex items-center gap-4 mb-6">
-            <User className="text-cyan-accent" size={24} />
-            <h3 className="text-xl font-bold uppercase tracking-widest">{t.profiles}</h3>
-          </div>
-          
-          <div className="space-y-4 mb-8">
-            {profiles.map(profile => (
-              <div key={profile.id} className="flex items-center justify-between bg-white/5 p-4 rounded-2xl border border-white/5">
-                <div className="flex items-center gap-3">
-                  <div className={`w-2 h-2 rounded-full ${profile.id === activeProfileId ? 'bg-cyan-accent shadow-[0_0_8px_rgba(0,216,255,0.6)]' : 'bg-white/20'}`} />
-                  <span className={`font-bold ${profile.id === activeProfileId ? 'text-white' : 'text-white/40'}`}>{profile.name}</span>
-                </div>
-                <div className="flex gap-4">
-                  {profile.id !== activeProfileId && (
-                    <button 
-                      onClick={() => onSwitchProfile(profile.id)}
-                      className="text-[10px] uppercase tracking-widest font-bold text-cyan-accent hover:text-white transition-colors"
-                    >
-                      {t.switch}
-                    </button>
-                  )}
-                  {profiles.length > 1 && (
-                    <button 
-                      onClick={() => onDeleteProfile(profile.id)}
-                      className="text-[10px] uppercase tracking-widest font-bold text-red-500/60 hover:text-red-500 transition-colors"
-                    >
-                      {t.deleteProfile}
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="flex gap-2">
-            <input 
-              type="text" 
-              placeholder={t.profileName}
-              value={newProfileName}
-              onChange={(e) => setNewProfileName(e.target.value)}
-              className="flex-grow bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-cyan-accent transition-colors"
-            />
-            <button 
-              onClick={() => {
-                if (newProfileName.trim()) {
-                  onCreateProfile(newProfileName.trim());
-                  setNewProfileName('');
-                }
-              }}
-              className="bg-cyan-accent text-black font-bold px-6 py-3 rounded-xl text-xs uppercase tracking-widest hover:bg-white transition-colors"
-            >
-              {t.create}
-            </button>
-          </div>
-        </div>
-
         {/* Plan Info */}
         <div className="bg-gradient-to-br from-cyan-accent/20 to-purple-500/20 border border-white/10 rounded-3xl p-8 flex items-center justify-between">
           <div>
@@ -1155,17 +1206,24 @@ const SettingsView = ({
           </button>
         </div>
 
-        {/* Download Report */}
-        <div className="bg-white/5 border border-white/10 rounded-3xl p-8 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <FileText className="text-cyan-accent" size={24} />
-            <h3 className="text-lg font-bold uppercase tracking-widest">{t.downloadReport}</h3>
+        {/* User Account & Logout */}
+        <div className="bg-red-500/5 border border-red-500/20 rounded-3xl p-8 mt-12">
+          <div className="flex items-center gap-6 mb-8">
+            <div className="w-16 h-16 rounded-2xl overflow-hidden border-2 border-white/10">
+              <img src={user?.photoURL || "https://picsum.photos/seed/user/100/100"} alt="User" className="w-full h-full object-cover" />
+            </div>
+            <div>
+              <div className="text-[10px] text-white/40 uppercase tracking-widest mb-1">{language === 'pt' ? 'Conectado como' : language === 'es' ? 'Conectado como' : 'Logged in as'}</div>
+              <div className="text-xl font-black text-white">{user?.displayName}</div>
+              <div className="text-xs text-white/40">{user?.email}</div>
+            </div>
           </div>
           <button 
-            onClick={onDownloadReport}
-            className="bg-white/10 hover:bg-white/20 text-white p-3 rounded-xl transition-all"
+            onClick={onLogout}
+            className="w-full bg-red-600/10 border border-red-600/20 hover:bg-red-600 hover:text-white text-red-500 font-black py-4 rounded-2xl transition-all flex items-center justify-center gap-3 uppercase tracking-widest text-xs"
           >
-            <ChevronRight size={24} />
+            <AlertCircle size={18} />
+            {language === 'pt' ? 'Sair da Conta' : language === 'es' ? 'Cerrar Sesión' : 'Logout'}
           </button>
         </div>
       </div>
@@ -1254,91 +1312,30 @@ const BottomNav = ({ current, onNavigate, language }: { current: AppState, onNav
 };
 
 export default function App() {
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [state, setState] = useState<AppState>('splash');
   const [language, setLanguage] = useState<Language>(() => (localStorage.getItem('ergo_lang') as Language) || 'pt');
   const [postureStatus, setPostureStatus] = useState<PostureStatus>('good');
 
-  const generateReport = () => {
-    const doc = new jsPDF();
-    
-    // Title
-    doc.setFontSize(22);
-    doc.setTextColor(0, 216, 255); // Cyan accent
-    doc.text("ErgoCam - Relatório de Atualizações", 10, 20);
-    
-    doc.setFontSize(12);
-    doc.setTextColor(100);
-    doc.text(`Gerado em: ${new Date().toLocaleString()}`, 10, 30);
-    
-    // Section: Updates
-    doc.setFontSize(16);
-    doc.setTextColor(0);
-    doc.text("1. Atualizações Implementadas", 10, 45);
-    
-    const updates = [
-      ["Interface Cyberpunk", "UI moderna com animações Framer Motion e ícones Lucide."],
-      ["Multi-idioma", "Suporte completo para Português, Inglês e Espanhol."],
-      ["Detecção de Postura", "Algoritmo de visão computacional para monitoramento em tempo real."],
-      ["Calibração de Fundo", "Sistema para ignorar ruído visual e focar no usuário."],
-      ["Zona de Detecção (ROI)", "Seleção manual da área de monitoramento para maior precisão."],
-      ["Gestão de Perfis", "Criação e alternância entre múltiplos perfis de usuário."],
-      ["Estatísticas", "Gráficos de evolução de pontuação e tempo de postura correta."],
-      ["Alertas", "Notificações visuais, sonoras e do sistema para má postura."],
-      ["Planos e Assinaturas", "Estrutura de planos Free, Pro e Enterprise."]
-    ];
-    
-    (doc as any).autoTable({
-      startY: 50,
-      head: [['Funcionalidade', 'Descrição']],
-      body: updates,
-      theme: 'grid',
-      headStyles: { fillColor: [0, 216, 255] }
-    });
-    
-    // Section: Difficulties
-    const finalY = (doc as any).lastAutoTable.cursor.y || 150;
-    doc.setFontSize(16);
-    doc.text("2. Dificuldades de Implementação", 10, finalY + 20);
-    
-    const difficulties = [
-      ["Processamento Real-time", "Garantir performance fluida (FPS alto) processando frames no navegador."],
-      ["Robustez Algorítmica", "Lidar com variações de iluminação e fundos complexos sem usar modelos pesados de IA."],
-      ["Privacidade", "Manter todo o processamento local, sem envio de dados para servidores."],
-      ["UX de Calibração", "Tornar o processo de calibração intuitivo para usuários não técnicos."],
-      ["Sincronização de Estado", "Gerenciar estados complexos entre câmera, configurações e estatísticas em tempo real."]
-    ];
-    
-    (doc as any).autoTable({
-      startY: finalY + 25,
-      head: [['Desafio', 'Solução/Contexto']],
-      body: difficulties,
-      theme: 'striped',
-      headStyles: { fillColor: [255, 99, 71] } // Tomato color for challenges
-    });
-    
-    doc.save("ErgoCam_Update_Report.pdf");
+  const [profiles, setProfiles] = useState<UserProfile[]>([]);
+  const [activeProfileId, setActiveProfileId] = useState('default');
+  const [plan, setPlan] = useState<UserPlan>('free');
+
+  const fallbackProfile: UserProfile = {
+    id: 'default',
+    name: 'Padrão',
+    history: [],
+    streak: 0,
+    sensitivity: 15,
+    calibrationOffset: 0,
+    audioEnabled: true,
+    notificationsEnabled: false,
+    plan: 'free'
   };
-  
-  // Profile Management State
-  const [profiles, setProfiles] = useState<UserProfile[]>(() => {
-    const saved = localStorage.getItem('ergo_profiles');
-    if (saved) return JSON.parse(saved);
-    return [{
-      id: 'default',
-      name: 'Padrão',
-      history: JSON.parse(localStorage.getItem('ergo_history') || '[]'),
-      streak: Number(localStorage.getItem('ergo_streak')) || 0,
-      sensitivity: Number(localStorage.getItem('ergo_sensitivity')) || 15,
-      calibrationOffset: Number(localStorage.getItem('ergo_calibration')) || 0,
-      audioEnabled: localStorage.getItem('ergo_audio') !== 'false',
-      notificationsEnabled: localStorage.getItem('ergo_notifications') === 'true',
-      plan: (localStorage.getItem('ergo_plan') as UserPlan) || 'free'
-    }];
-  });
-  const [activeProfileId, setActiveProfileId] = useState(() => localStorage.getItem('ergo_active_profile') || 'default');
 
   // Active Profile Data
-  const activeProfile = profiles.find(p => p.id === activeProfileId) || profiles[0];
+  const activeProfile = profiles.find(p => p.id === activeProfileId) || profiles[0] || fallbackProfile;
 
   // Flat states for the active profile (synced)
   const [sensitivity, setSensitivity] = useState(activeProfile.sensitivity);
@@ -1347,7 +1344,6 @@ export default function App() {
   const [calibrationOffset, setCalibrationOffset] = useState(activeProfile.calibrationOffset);
   const [history, setHistory] = useState<PostureData[]>(activeProfile.history);
   const [streak, setStreak] = useState(activeProfile.streak);
-  const [plan, setPlan] = useState<UserPlan>(activeProfile.plan);
 
   const [pomodoroTime, setPomodoroTime] = useState(25 * 60);
   const [isPomodoroActive, setIsPomodoroActive] = useState(false);
@@ -1378,6 +1374,109 @@ export default function App() {
 
   const setLang = (l: Language) => setLanguage(l);
   const t = translations[language].dashboard;
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      setUser(firebaseUser);
+      if (firebaseUser) {
+        const userPath = `users/${firebaseUser.uid}`;
+        try {
+          const userRef = doc(db, 'users', firebaseUser.uid);
+          const userSnap = await getDoc(userRef);
+          
+          let initialPlan: UserPlan = 'free';
+          let initialProfiles: UserProfile[] = [];
+
+          if (userSnap.exists()) {
+            const userData = userSnap.data();
+            initialPlan = userData.plan || 'free';
+            initialProfiles = userData.profiles || [];
+          } else {
+            initialProfiles = [{
+              id: 'default',
+              name: firebaseUser.displayName || 'Padrão',
+              history: [],
+              streak: 0,
+              sensitivity: 15,
+              calibrationOffset: 0,
+              audioEnabled: true,
+              notificationsEnabled: false,
+              plan: 'free'
+            }];
+            await setDoc(userRef, {
+              email: firebaseUser.email,
+              plan: 'free',
+              profiles: initialProfiles,
+              createdAt: new Date().toISOString()
+            });
+          }
+          
+          setPlan(initialPlan);
+          setProfiles(initialProfiles);
+          const savedActiveId = localStorage.getItem(`ergo_active_profile_${firebaseUser.uid}`) || 'default';
+          setActiveProfileId(initialProfiles.find(p => p.id === savedActiveId) ? savedActiveId : initialProfiles[0]?.id || 'default');
+        } catch (error) {
+          handleFirestoreError(error, OperationType.GET, userPath);
+        }
+      }
+      setAuthLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Sync state changes to active profile
+  useEffect(() => {
+    if (!user) return;
+    setProfiles(prev => prev.map(p => 
+      p.id === activeProfileId 
+        ? { ...p, sensitivity, audioEnabled, notificationsEnabled, calibrationOffset, history, streak, plan } 
+        : p
+    ));
+  }, [sensitivity, audioEnabled, notificationsEnabled, calibrationOffset, history, streak, plan, activeProfileId]);
+
+  // Sync profiles to Firestore
+  useEffect(() => {
+    if (user && profiles.length > 0) {
+      const userPath = `users/${user.uid}`;
+      const userRef = doc(db, 'users', user.uid);
+      updateDoc(userRef, { profiles, plan }).catch(err => {
+        handleFirestoreError(err, OperationType.UPDATE, userPath);
+      });
+    }
+  }, [profiles, plan, user]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const paymentStatus = params.get('payment');
+    if (paymentStatus === 'success' && user) {
+      const updatePlan = async () => {
+        const userPath = `users/${user.uid}`;
+        try {
+          const userRef = doc(db, 'users', user.uid);
+          await updateDoc(userRef, { plan: 'pro' });
+          setPlan('pro');
+          window.history.replaceState({}, document.title, window.location.pathname);
+          alert("Pagamento processado com sucesso! Plano Pro ativado.");
+        } catch (error) {
+          handleFirestoreError(error, OperationType.UPDATE, userPath);
+        }
+      };
+      updatePlan();
+    } else if (paymentStatus === 'failure') {
+      alert("O pagamento falhou. Tente novamente.");
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  }, [user]);
+
+  const handleLogin = async () => {
+    const provider = new GoogleAuthProvider();
+    await signInWithPopup(auth, provider);
+  };
+
+  const handleLogout = async () => {
+    await signOut(auth);
+    setState('splash');
+  };
 
   // Check camera permission on mount
   useEffect(() => {
@@ -1427,58 +1526,6 @@ export default function App() {
       plan
     } : p));
   }, [sensitivity, audioEnabled, notificationsEnabled, calibrationOffset, history, streak, plan, activeProfileId]);
-
-  // Handle Profile Switching
-  const handleSwitchProfile = (id: string) => {
-    // Save current states to the current active profile first
-    setProfiles(prev => prev.map(p => p.id === activeProfileId ? {
-      ...p,
-      sensitivity,
-      audioEnabled,
-      notificationsEnabled,
-      calibrationOffset,
-      history,
-      streak,
-      plan
-    } : p));
-
-    const target = profiles.find(p => p.id === id);
-    if (target) {
-      setActiveProfileId(id);
-      setSensitivity(target.sensitivity);
-      setAudioEnabled(target.audioEnabled);
-      setNotificationsEnabled(target.notificationsEnabled);
-      setCalibrationOffset(target.calibrationOffset);
-      setHistory(target.history);
-      setStreak(target.streak);
-      setPlan(target.plan);
-    }
-  };
-
-  const handleCreateProfile = (name: string) => {
-    const newProfile: UserProfile = {
-      id: Date.now().toString(),
-      name,
-      history: [],
-      streak: 0,
-      sensitivity: 25,
-      calibrationOffset: 0,
-      audioEnabled: true,
-      notificationsEnabled: false,
-      plan: 'free'
-    };
-    setProfiles(prev => [...prev, newProfile]);
-    handleSwitchProfile(newProfile.id);
-  };
-
-  const handleDeleteProfile = (id: string) => {
-    if (profiles.length <= 1) return;
-    const newProfiles = profiles.filter(p => p.id !== id);
-    setProfiles(newProfiles);
-    if (activeProfileId === id) {
-      handleSwitchProfile(newProfiles[0].id);
-    }
-  };
 
   const updateStatus = (newStatus: PostureStatus, angle: number) => {
     if (newStatus !== postureStatus) {
@@ -1854,8 +1901,20 @@ export default function App() {
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-black flex items-center justify-center">
+        <div className="w-16 h-16 border-4 border-cyan-accent border-t-transparent rounded-full animate-spin"></div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <LoginScreen language={language} onLogin={handleLogin} />;
+  }
+
   return (
-    <div className="min-h-screen bg-dark-bg text-white font-sans selection:bg-cyan-accent selection:text-black">
+    <div className="min-h-screen bg-black text-slate-200 font-sans selection:bg-cyan-accent selection:text-black">
       <AnimatePresence>
         {state === 'splash' && (
           <SplashScreen 
@@ -2305,14 +2364,10 @@ export default function App() {
               onToggleROISelection={() => setIsSelectingROI(!isSelectingROI)}
               currentPlan={plan}
               onUpgrade={() => setState('pricing')}
-              profiles={profiles}
-              activeProfileId={activeProfileId}
-              onSwitchProfile={handleSwitchProfile}
-              onCreateProfile={handleCreateProfile}
-              onDeleteProfile={handleDeleteProfile}
-              onDownloadReport={generateReport}
               useML={useML}
               onToggleML={() => setUseML(!useML)}
+              user={user}
+              onLogout={handleLogout}
             />
           )}
         </motion.main>
