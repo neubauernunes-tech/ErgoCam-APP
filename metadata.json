@@ -1,0 +1,7 @@
+{
+  "name": "ErgoCam",
+  "description": "Monitor de Postura Inteligente utilizando Visão Computacional para prevenir dores nas costas.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
